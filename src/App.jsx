@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import "./index.css";
+import "./src/index.css";
 
 /* ═══════════════════════════════════════════════════════════════
    AQUASMART — App.jsx limpio
