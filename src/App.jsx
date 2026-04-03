@@ -13,7 +13,7 @@ const WS  = "wss://backend-48ai.onrender.com/ws";
 // Pon el archivo en la carpeta public/ y escribe el nombre aquí.
 // Ejemplo: const LOGO_SRC = "/logo.png";
 // Si es null, se muestra el ícono SVG de gota de agua por defecto.
-const LOGO_SRC = "./img/AquaSmart1.png";
+const LOGO_SRC = "img/AquaSmart1.png";
 
 const USERS = {
   operario: { password: "operario123", role: "operator", label: "Operario" },
