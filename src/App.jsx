@@ -188,7 +188,7 @@ function LoginScreen({ onLogin }) {
     await new Promise(r => setTimeout(r, 600));
     const found = USERS[user.toLowerCase()];
     if (found && found.password === pass) {
-      onLogin({ username: user.toLowerCase(), role: found.role, label: found.label });
+        onLogin({ username: user.toLowerCase(), role: found.role, label: found.label, password: pass });
     } else {
       setErr("Usuario o contraseña incorrectos");
     }
@@ -1489,28 +1489,137 @@ export default function App() {
   const [alerts,     setAlerts]     = useState([
     { id: 1, type: "warning", msg: "Sistema iniciado correctamente", time: "hace un momento" },
   ]);
-  const [logs,  setLogs]  = useState([
+  const [logs,   setLogs]   = useState([
     { id: 1, user: "sistema", action: "Sistema AquaSmart iniciado", time: "ahora" },
   ]);
   const [toasts, setToasts] = useState([]);
   const toastId = useRef(200);
+  const wsRef   = useRef(null);
 
-  // Toast helper
+  const API = "https://backend-48ai.onrender.com";
+  const WS  = "wss://backend-48ai.onrender.com/ws";
+
+  // ── Toast helper ──────────────────────────────────────────────
   const addToast = useCallback((msg, type = "info") => {
     const id = toastId.current++;
     setToasts(t => [...t, { id, msg, type }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3500);
   }, []);
 
-  // Log helper
+  // ── Log helper ────────────────────────────────────────────────
   const addLog = useCallback((user, action) => {
     setLogs(prev => [{ id: Date.now(), user, action, time: "ahora" }, ...prev.slice(0, 49)]);
   }, []);
 
-  // ── Simulación en tiempo real ───────────────────────────────────
+  // ── WebSocket — conexión con reconexión automática ─────────────
+  useEffect(() => {
+    let ws, reconnectTimer;
+
+    function connect() {
+      ws = new WebSocket(WS);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log("✅ WebSocket conectado al backend");
+        // Ping cada 20s para mantener vivo en Render Free
+        const ping = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 20000);
+        ws._ping = ping;
+      };
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+
+        if (msg.type === "initial") {
+          if (msg.thresholds) setThresholds(msg.thresholds);
+          if (msg.auto_mode !== undefined) setAutoMode(msg.auto_mode);
+          if (msg.tank && Object.keys(msg.tank).length > 0) {
+            setTank(prev => ({ ...prev, ...msg.tank, online: msg.esp32_online }));
+          }
+        }
+
+        if (msg.type === "telemetry" && msg.data) {
+          setTank(prev => ({
+            ...prev,
+            level:    msg.data.level    ?? prev.level,
+            pump:     msg.data.pump     ?? prev.pump,
+            valve:    msg.data.valve    ?? prev.valve,
+            temp:     msg.data.temp     ?? prev.temp,
+            flow:     msg.data.flow     ?? prev.flow,
+            pressure: msg.data.pressure ?? prev.pressure,
+            online:   true,
+          }));
+        }
+
+        if (msg.type === "alert" && msg.data) {
+          const a = {
+            id:   Date.now(),
+            type: msg.data.alert_type === "low" ? "danger" : msg.data.alert_type === "high" ? "warning" : "info",
+            msg:  msg.data.msg || `Alerta de nivel: ${msg.data.level}%`,
+            time: "ahora",
+          };
+          setAlerts(prev => [a, ...prev.slice(0, 29)]);
+          addToast(a.msg, a.type === "danger" ? "error" : "info");
+        }
+
+        if (msg.type === "thresholds_update") {
+          setThresholds(msg.thresholds);
+        }
+
+        if (msg.type === "auto_mode_update") {
+          setAutoMode(msg.auto_mode);
+        }
+
+        if (msg.type === "pump_update") {
+          setTank(prev => ({ ...prev, pump: msg.pump }));
+        }
+
+        if (msg.type === "valve_update") {
+          setTank(prev => ({ ...prev, valve: msg.valve }));
+        }
+
+        if (msg.type === "esp32_online") {
+          setTank(prev => ({ ...prev, online: msg.online }));
+          addToast(
+            msg.online ? "ESP32 conectado" : "ESP32 desconectado",
+            msg.online ? "success" : "error"
+          );
+        }
+
+        if (msg.type === "tank_renamed") {
+          setTank(prev => ({ ...prev, name: msg.name }));
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("🔴 WebSocket desconectado — reconectando en 4s...");
+        if (ws._ping) clearInterval(ws._ping);
+        reconnectTimer = setTimeout(connect, 4000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
+    };
+  }, [addToast]);
+
+  // ── Simulación local cuando el ESP32 no está conectado ─────────
   useEffect(() => {
     const iv = setInterval(() => {
       setTank(prev => {
+        if (prev.online) return prev; // Si ESP32 real conectado, no simular
+
         const delta = (Math.random() - 0.49) * 1.5;
         const newLevel = Math.max(3, Math.min(99, prev.level + delta));
         let pump = prev.pump, valve = prev.valve;
@@ -1537,10 +1646,10 @@ export default function App() {
 
         return {
           ...prev,
-          level: Math.round(newLevel * 10) / 10,
+          level:    Math.round(newLevel * 10) / 10,
           pump, valve,
-          flow: Math.round((Math.random() * 2 + 0.8) * 10) / 10,
-          temp: prev.temp + (Math.random() > 0.95 ? (Math.random() > 0.5 ? 1 : -1) : 0),
+          flow:     Math.round((Math.random() * 2 + 0.8) * 10) / 10,
+          temp:     prev.temp + (Math.random() > 0.95 ? (Math.random() > 0.5 ? 1 : -1) : 0),
           pressure: Math.round((Math.random() * 0.4 + 1.2) * 10) / 10,
         };
       });
@@ -1548,52 +1657,97 @@ export default function App() {
     return () => clearInterval(iv);
   }, [thresholds, autoMode, addToast]);
 
-  // ── Acciones ────────────────────────────────────────────────────
+  // ── Acciones — llaman al backend real si hay sesión ────────────
+  const callAPI = useCallback(async (endpoint, body, token) => {
+    try {
+      const res = await fetch(`${API}${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const togglePump = useCallback(() => {
     setTank(p => {
       const next = !p.pump;
       addLog(session?.username || "sistema", `Motobomba ${next ? "encendida" : "apagada"} manualmente`);
+      if (session?.token) callAPI("/api/control/pump", { on: next }, session.token);
       return { ...p, pump: next };
     });
-  }, [session, addLog]);
+  }, [session, addLog, callAPI]);
 
   const toggleValve = useCallback(() => {
     setTank(p => {
       const next = !p.valve;
       addLog(session?.username || "sistema", `Compuerta ${next ? "abierta" : "cerrada"} manualmente`);
+      if (session?.token) callAPI("/api/control/valve", { open: next }, session.token);
       return { ...p, valve: next };
     });
-  }, [session, addLog]);
+  }, [session, addLog, callAPI]);
 
   const handleSetThresholds = useCallback((t) => {
     setThresholds(t);
-    addLog(session?.username || "admin", `Umbrales actualizados: bajo=${t.low}%, alto=${t.high}%`);
-  }, [session, addLog]);
+    addLog(session?.username || "admin", `Umbrales → bajo=${t.low}%, alto=${t.high}%`);
+    if (session?.token) callAPI("/api/control/thresholds", t, session.token);
+  }, [session, addLog, callAPI]);
 
   const handleToggleAutoMode = useCallback((v) => {
     setAutoMode(v);
     addLog(session?.username || "admin", `Modo ${v ? "automático" : "manual"} activado`);
-  }, [session, addLog]);
+    if (session?.token) callAPI("/api/control/auto-mode", { enabled: v }, session.token);
+  }, [session, addLog, callAPI]);
 
   const handleRenameTank = useCallback((name) => {
     setTank(p => {
       addLog(session?.username || "admin", `Tanque renombrado a "${name}"`);
+      if (session?.token) callAPI("/api/control/rename", { name }, session.token);
       return { ...p, name };
     });
-  }, [session, addLog]);
+  }, [session, addLog, callAPI]);
 
-  // Sin sesión → login
+  // ── Login real contra el backend ───────────────────────────────
+  const handleLogin = useCallback(async (sessionData) => {
+    if (sessionData.role === "public") {
+      setSession(sessionData);
+      return;
+    }
+    try {
+      const res = await fetch(`${API}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `username=${sessionData.username}&password=${sessionData.password}`,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSession({ ...sessionData, token: data.access_token, role: data.role, label: data.label });
+        addLog(sessionData.username, "Sesión iniciada");
+      } else {
+        return false;
+      }
+    } catch {
+      // Si el backend no responde, usar login local de demo
+      setSession(sessionData);
+    }
+    return true;
+  }, [addLog]);
+
   if (!session) {
-    return <LoginScreen onLogin={setSession} />;
+    return <LoginScreen onLogin={handleLogin} />;
   }
 
-  // Props comunes
   const sharedProps = {
     tank, thresholds, alerts,
-    onTogglePump: togglePump,
+    onTogglePump:  togglePump,
     onToggleValve: toggleValve,
-    onLogout: () => setSession(null),
-    toastFn: addToast,
+    onLogout:      () => { setSession(null); addLog("sistema", "Sesión cerrada"); },
+    toastFn:       addToast,
   };
 
   return (
